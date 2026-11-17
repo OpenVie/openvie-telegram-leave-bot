@@ -1,0 +1,395 @@
+import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
+
+const ENV_FILE = '.env';
+const SUBMISSIONS_FILE = 'submissions.json';
+const UPDATE_OFFSET_FILE = 'update-offset.json';
+const LEAVE_TYPES = {
+  annual_leave: 'Nghỉ phép năm',
+  sick_leave: 'Nghỉ ốm',
+  maternity_leave: 'Nghỉ thai sản',
+  remote_work: 'Làm việc từ xa',
+};
+
+class ServiceError extends Error {}
+
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function errorLabel(error) {
+  return error instanceof ServiceError ? error.message : 'unexpected error';
+}
+
+async function readEnvFile() {
+  let source;
+  try {
+    source = await readFile(ENV_FILE, 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      throw new ServiceError('Missing .env. Copy .env.example to .env and fill in the values.');
+    }
+    throw new ServiceError('Cannot read .env.');
+  }
+
+  const values = {};
+  for (const rawLine of source.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const separator = line.indexOf('=');
+    if (separator <= 0) continue;
+    const key = line.slice(0, separator).trim();
+    let value = line.slice(separator + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    values[key] = value;
+  }
+  return values;
+}
+
+function buildConfig(values) {
+  const required = [
+    'TELEGRAM_BOT_TOKEN',
+    'OPENVIE_API_KEY',
+    'OPENVIE_BASE_URL',
+    'OPENVIE_APP_KIND',
+    'OPENVIE_ENTITY',
+    'POLL_INTERVAL_MS',
+  ];
+  const missing = required.filter((key) => !values[key]);
+  if (missing.length) throw new ServiceError(`Missing .env values: ${missing.join(', ')}.`);
+  if (!values.OPENVIE_API_KEY.startsWith('ovk_')) {
+    throw new ServiceError('OPENVIE_API_KEY must be an ovk_ API key.');
+  }
+  try {
+    new URL(values.OPENVIE_BASE_URL);
+  } catch {
+    throw new ServiceError('OPENVIE_BASE_URL must be a valid URL.');
+  }
+  const pollIntervalMs = Number(values.POLL_INTERVAL_MS);
+  if (!Number.isFinite(pollIntervalMs) || pollIntervalMs < 1000) {
+    throw new ServiceError('POLL_INTERVAL_MS must be a number of at least 1000.');
+  }
+  return {
+    telegramToken: values.TELEGRAM_BOT_TOKEN,
+    openVieApiKey: values.OPENVIE_API_KEY,
+    openVieBaseUrl: values.OPENVIE_BASE_URL.replace(/\/+$/, ''),
+    appKind: values.OPENVIE_APP_KIND,
+    entity: values.OPENVIE_ENTITY,
+    pollIntervalMs,
+  };
+}
+
+async function readJson(fileName, fallback) {
+  try {
+    const raw = await readFile(fileName, 'utf8');
+    await chmod(fileName, 0o600);
+    return JSON.parse(raw);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return fallback;
+    throw new ServiceError(`Cannot read ${fileName}.`);
+  }
+}
+
+async function writePrivateJson(fileName, value) {
+  const temporaryFile = `${fileName}.tmp`;
+  await writeFile(temporaryFile, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  await chmod(temporaryFile, 0o600);
+  await rename(temporaryFile, fileName);
+  await chmod(fileName, 0o600);
+}
+
+async function loadSubmissions() {
+  const data = await readJson(SUBMISSIONS_FILE, {});
+  if (!data || Array.isArray(data) || typeof data !== 'object') {
+    throw new ServiceError('submissions.json must contain an object.');
+  }
+  return data;
+}
+
+async function loadOffset() {
+  const data = await readJson(UPDATE_OFFSET_FILE, { offset: 0 });
+  return Number.isSafeInteger(data?.offset) && data.offset >= 0 ? data.offset : 0;
+}
+
+function apiPath(config, recordId = '') {
+  const base = `${config.openVieBaseUrl}/api/v1/bizapp-data/${encodeURIComponent(config.appKind)}/${encodeURIComponent(config.entity)}`;
+  return recordId ? `${base}/${encodeURIComponent(recordId)}` : base;
+}
+
+async function openVieRequest(config, method, url, body) {
+  let response;
+  try {
+    response = await fetch(url, {
+      method,
+      headers: {
+        Authorization: `Bearer ${config.openVieApiKey}`,
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+  } catch {
+    throw new ServiceError('OpenVie request failed. Check network and OPENVIE_BASE_URL.');
+  }
+  if (!response.ok) throw new ServiceError(`OpenVie returned HTTP ${response.status}.`);
+  try {
+    return await response.json();
+  } catch {
+    throw new ServiceError('OpenVie returned invalid JSON.');
+  }
+}
+
+async function telegramRequest(config, method, payload) {
+  let response;
+  try {
+    response = await fetch(`https://api.telegram.org/bot${config.telegramToken}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    throw new ServiceError('Telegram request failed. Check network and TELEGRAM_BOT_TOKEN.');
+  }
+  if (!response.ok) throw new ServiceError(`Telegram returned HTTP ${response.status}.`);
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    throw new ServiceError('Telegram returned invalid JSON.');
+  }
+  if (!data.ok) throw new ServiceError('Telegram rejected the request. Check TELEGRAM_BOT_TOKEN.');
+  return data.result;
+}
+
+function askText(step) {
+  return {
+    employee_name: 'Họ và tên nhân viên?',
+    email: 'Email công ty?',
+    start_date: 'Ngày bắt đầu (YYYY-MM-DD)?',
+    end_date: 'Ngày kết thúc (YYYY-MM-DD)?',
+    days: 'Số ngày nghỉ (số dương)?',
+    reason: 'Lý do nghỉ?',
+  }[step];
+}
+
+function isValidDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+function leaveKeyboard() {
+  return {
+    inline_keyboard: Object.entries(LEAVE_TYPES).map(([type, label]) => [
+      { text: label, callback_data: `leave:${type}` },
+    ]),
+  };
+}
+
+async function sendMessage(config, chatId, text, extra = {}) {
+  return telegramRequest(config, 'sendMessage', { chat_id: chatId, text, ...extra });
+}
+
+async function submitLeave(config, state, chatId, form) {
+  if (form.submitting) return;
+  form.submitting = true;
+  try {
+    const record = await openVieRequest(config, 'POST', apiPath(config), { payload: form.data });
+    if (!record?.id) throw new ServiceError('OpenVie created a response without a record ID.');
+    state.submissions[record.id] = {
+      chatId,
+      processId: record.runtime?.processId ?? null,
+      createdAt: new Date().toISOString(),
+    };
+    await writePrivateJson(SUBMISSIONS_FILE, state.submissions);
+    state.forms.delete(chatId);
+    const processId = record.runtime?.processId ?? '(không có trong phản hồi)';
+    await sendMessage(
+      config,
+      chatId,
+      `Đơn đã gửi, chờ admin duyệt trên Yaak.\nrecordId: ${record.id}\nprocessId: ${processId}`,
+    );
+  } catch (error) {
+    form.submitting = false;
+    await sendMessage(config, chatId, `Không thể gửi đơn: ${errorLabel(error)} Vui lòng thử lại hoặc /cancel.`).catch(() => {});
+  }
+}
+
+async function handleFormText(config, state, chatId, text) {
+  const form = state.forms.get(chatId);
+  if (!form || form.submitting) return false;
+  const value = text.trim();
+  const { step } = form;
+
+  if (step === 'employee_name' || step === 'reason') {
+    if (!value) {
+      await sendMessage(config, chatId, 'Trường này không được để trống.');
+      return true;
+    }
+    form.data[step] = value;
+  } else if (step === 'email') {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+      await sendMessage(config, chatId, 'Email chưa hợp lệ. Hãy nhập lại.');
+      return true;
+    }
+    form.data.email = value;
+  } else if (step === 'start_date' || step === 'end_date') {
+    if (!isValidDate(value)) {
+      await sendMessage(config, chatId, 'Ngày chưa hợp lệ. Dùng đúng định dạng YYYY-MM-DD.');
+      return true;
+    }
+    if (step === 'end_date' && value < form.data.start_date) {
+      await sendMessage(config, chatId, 'Ngày kết thúc không thể trước ngày bắt đầu.');
+      return true;
+    }
+    form.data[step] = value;
+  } else if (step === 'days') {
+    const days = Number(value);
+    if (!Number.isFinite(days) || days <= 0) {
+      await sendMessage(config, chatId, 'Số ngày phải là một số dương.');
+      return true;
+    }
+    form.data.days = days;
+  }
+
+  const next = {
+    employee_name: 'email',
+    email: 'leave_type',
+    start_date: 'end_date',
+    end_date: 'days',
+    days: 'reason',
+  }[step];
+  if (step === 'reason') {
+    await submitLeave(config, state, chatId, form);
+    return true;
+  }
+  form.step = next;
+  if (next === 'leave_type') {
+    await sendMessage(config, chatId, 'Chọn loại nghỉ:', { reply_markup: leaveKeyboard() });
+  } else {
+    await sendMessage(config, chatId, askText(next));
+  }
+  return true;
+}
+
+async function handleMessage(config, state, message) {
+  const chatId = message?.chat?.id;
+  if (!chatId || typeof message.text !== 'string') return;
+  const text = message.text.trim();
+  const command = text.startsWith('/') ? text.split(/\s+/, 1)[0].split('@', 1)[0] : null;
+  if (command === '/start') {
+    await sendMessage(config, chatId, 'Chào bạn! Dùng /leave để gửi đơn nghỉ phép. Bạn có thể dùng /cancel để hủy form đang nhập.');
+    return;
+  }
+  if (command === '/leave') {
+    state.forms.set(chatId, { step: 'employee_name', data: {} });
+    await sendMessage(config, chatId, askText('employee_name'));
+    return;
+  }
+  if (command === '/cancel') {
+    if (state.forms.delete(chatId)) await sendMessage(config, chatId, 'Đã hủy form nghỉ phép.');
+    else await sendMessage(config, chatId, 'Bạn không có form nào đang nhập.');
+    return;
+  }
+  if (command) {
+    await sendMessage(config, chatId, 'Lệnh không hỗ trợ. Dùng /leave để bắt đầu hoặc /cancel để hủy.');
+    return;
+  }
+  const consumed = await handleFormText(config, state, chatId, text);
+  if (!consumed) await sendMessage(config, chatId, 'Dùng /leave để gửi đơn nghỉ phép.');
+}
+
+async function handleCallback(config, state, callback) {
+  const chatId = callback?.message?.chat?.id;
+  const data = callback?.data;
+  if (!callback?.id || !chatId || typeof data !== 'string') return;
+  await telegramRequest(config, 'answerCallbackQuery', { callback_query_id: callback.id }).catch(() => {});
+  const type = data.startsWith('leave:') ? data.slice('leave:'.length) : '';
+  const form = state.forms.get(chatId);
+  if (!form || form.step !== 'leave_type' || !LEAVE_TYPES[type]) {
+    await sendMessage(config, chatId, 'Lựa chọn này không còn hiệu lực. Dùng /leave để bắt đầu lại.');
+    return;
+  }
+  form.data.leave_type = type;
+  form.step = 'start_date';
+  await sendMessage(config, chatId, askText('start_date'));
+}
+
+async function pollSubmissionStatuses(config, state) {
+  for (const [recordId, submission] of Object.entries(state.submissions)) {
+    if (!submission?.chatId) continue;
+    try {
+      const record = await openVieRequest(config, 'GET', apiPath(config, recordId));
+      const status = record?.runtime?.approvalStatus;
+      let message;
+      if (status === 'APPROVED') message = `Đơn #${recordId.slice(0, 8)}: ĐÃ DUYỆT.`;
+      if (status === 'REJECTED') message = `Đơn #${recordId.slice(0, 8)}: ĐÃ TỪ CHỐI.`;
+      if (!message) continue;
+      await sendMessage(config, submission.chatId, message);
+      delete state.submissions[recordId];
+      await writePrivateJson(SUBMISSIONS_FILE, state.submissions);
+    } catch (error) {
+      console.error(`Status poll for one submission failed: ${errorLabel(error)}`);
+    }
+  }
+}
+
+async function runTelegramLoop(config, state) {
+  while (true) {
+    try {
+      const updates = await telegramRequest(config, 'getUpdates', {
+        offset: state.offset,
+        timeout: 25,
+        allowed_updates: ['message', 'callback_query'],
+      });
+      for (const update of updates) {
+        try {
+          if (update.message) await handleMessage(config, state, update.message);
+          if (update.callback_query) await handleCallback(config, state, update.callback_query);
+        } catch (error) {
+          console.error(`Telegram update failed: ${errorLabel(error)}`);
+        } finally {
+          // A malformed or failed update must not stop every later update from arriving.
+          state.offset = update.update_id + 1;
+          try {
+            await writePrivateJson(UPDATE_OFFSET_FILE, { offset: state.offset });
+          } catch (error) {
+            console.error(`Could not save Telegram update offset: ${errorLabel(error)}`);
+          }
+        }
+      }
+    } catch (error) {
+      console.error(`Telegram polling failed: ${errorLabel(error)}`);
+      await sleep(5000);
+    }
+  }
+}
+
+async function runStatusLoop(config, state) {
+  while (true) {
+    await pollSubmissionStatuses(config, state).catch((error) => {
+      console.error(`Status polling loop failed: ${errorLabel(error)}`);
+    });
+    await sleep(config.pollIntervalMs);
+  }
+}
+
+async function main() {
+  if (Number(process.versions.node.split('.')[0]) < 22) {
+    throw new ServiceError('Node.js 22 or newer is required.');
+  }
+  const config = buildConfig(await readEnvFile());
+  const state = {
+    forms: new Map(),
+    submissions: await loadSubmissions(),
+    offset: await loadOffset(),
+  };
+  console.info('Telegram leave bot started.');
+  await Promise.all([runTelegramLoop(config, state), runStatusLoop(config, state)]);
+}
+
+main().catch((error) => {
+  console.error(`Bot could not start: ${errorLabel(error)}`);
+  process.exitCode = 1;
+});
