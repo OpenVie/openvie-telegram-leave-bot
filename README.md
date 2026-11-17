@@ -14,7 +14,7 @@ Token Telegram chỉ được dùng gọi `https://api.telegram.org/bot<TOKEN>/.
 
 1. Mở Telegram, tìm **@BotFather**, gửi `/newbot` và làm theo hướng dẫn để đặt tên bot.
 2. BotFather trả về token bot một lần. Lưu token đó vào `TELEGRAM_BOT_TOKEN` trong `.env`; không gửi OpenVie API key cho BotFather.
-3. Mở chat với bot mới, gửi `/start`, sau đó nhắn `Tôi muốn xin nghỉ` như khi dùng OpenVie Chat. Dùng `/new` để tạo cuộc trò chuyện mới; `/leave` là lối tắt gửi câu `Tôi muốn xin nghỉ`.
+3. Mở chat với bot mới, gửi `/start`, sau đó nhắn `Tôi muốn xin nghỉ` như khi dùng OpenVie Chat. Dùng `/new` để tạo cuộc trò chuyện mới; `/leave` là lối tắt gửi câu `Tôi muốn xin nghỉ`; `/status` hiển thị trạng thái các đơn đã gửi trong chat đó.
 
 ## Tạo OpenVie API key
 
@@ -67,7 +67,7 @@ POST /api/v1/chat/sessions/{sessionId}/messages
 POST /api/v1/chat/actions/execute
 ```
 
-Hai API đầu dùng assistant mặc định của workspace và trả cùng nội dung/action card như OpenVie Chat. Telegram hiển thị nội dung card dưới dạng tin nhắn; khi action có trạng thái `PROPOSED` (hoặc `VALID`), nút xác nhận của Telegram mới gọi API execute. Nhờ đó một tin nhắn chưa đủ thông tin sẽ không tạo bản ghi nghỉ phép.
+Hai API đầu dùng assistant mặc định của workspace và trả cùng nội dung/action card như OpenVie Chat. Telegram hiển thị nội dung card dưới dạng tin nhắn, kèm bản xem lại các trường đã trích xuất. Khi action có trạng thái `PROPOSED` (hoặc `VALID`), Telegram hiện `Xác nhận gửi đơn` và `Sửa lại`; nút sửa xóa preview cũ và yêu cầu người dùng gửi thông tin cần chỉnh. Chỉ nút xác nhận mới gọi API execute, nên một tin nhắn chưa đủ thông tin sẽ không tạo bản ghi nghỉ phép.
 
 Admin duyệt thủ công trong Yaak, không qua Telegram:
 
@@ -89,10 +89,10 @@ Sau đó complete task với một trong hai quyết định:
 
 Hoặc đổi `APPROVE` thành `REJECT`. Bot không có nút Approve/Reject và không tự claim/complete task.
 
-Sau khi tạo đơn, bot lưu `recordId -> chatId` trong `submissions.json`. Cứ mỗi `POLL_INTERVAL_MS`, bot đọc record từ:
+Sau khi tạo đơn, bot tự xóa các tin preview/nút xác nhận của chính bot và lưu `recordId -> chatId` trong `submissions.json`. Cứ mỗi `POLL_INTERVAL_MS`, bot đọc record từ:
 
 ```text
 GET /api/v1/bizapp-data/leave-requests/leave_requests/{recordId}
 ```
 
-Khi `runtime.approvalStatus` là `APPROVED` hoặc `REJECTED`, bot báo kết quả tới chat đã gửi và xóa mapping sau khi gửi thành công. Khi restart, bot đọc lại file này nên các đơn chờ vẫn được theo dõi.
+Khi `runtime.approvalStatus` là `APPROVED` hoặc `REJECTED`, bot báo kết quả tới chat đã gửi. Mapping được giữ lại để `/status` có thể trả `ĐANG CHỜ DUYỆT`, `ĐÃ DUYỆT`, hoặc `ĐÃ TỪ CHỐI` cho các đơn của chat đó. Khi restart, bot đọc lại file này nên các đơn vẫn tra cứu được.

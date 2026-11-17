@@ -200,8 +200,21 @@ function splitTelegramText(text) {
 
 async function sendLongMessage(config, chatId, text, extra = {}) {
   const chunks = splitTelegramText(text);
+  const messages = [];
   for (let index = 0; index < chunks.length; index += 1) {
-    await sendMessage(config, chatId, chunks[index], index === chunks.length - 1 ? extra : {});
+    messages.push(await sendMessage(config, chatId, chunks[index], index === chunks.length - 1 ? extra : {}));
+  }
+  return messages;
+}
+
+async function deleteTelegramMessages(config, chatId, messageIds = []) {
+  const uniqueIds = [...new Set(messageIds.filter(Number.isSafeInteger))];
+  for (const messageId of uniqueIds) {
+    try {
+      await telegramRequest(config, 'deleteMessage', { chat_id: chatId, message_id: messageId });
+    } catch (error) {
+      console.warn(`Could not delete Telegram message ${messageId}: ${errorLabel(error)}`);
+    }
   }
 }
 
@@ -237,6 +250,35 @@ function recordIdFromAction(result) {
   return candidates.find((value) => typeof value === 'string' && value) ?? null;
 }
 
+function displayFieldValue(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  if (Array.isArray(value)) return value.map(displayFieldValue).join(', ');
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+function actionReview(action) {
+  if (!action || typeof action !== 'object') return '';
+  const fields = action.fields;
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields) || Object.keys(fields).length === 0) {
+    return '';
+  }
+  const labels = action.fieldLabels && typeof action.fieldLabels === 'object'
+    ? action.fieldLabels
+    : {};
+  const entity = action.entityLabel || action.entity || 'yêu cầu';
+  const rows = Object.entries(fields).map(([name, value]) =>
+    `${labels[name] || name}: ${displayFieldValue(value)}`,
+  );
+  return [
+    `Vui lòng kiểm tra lại thông tin ${entity}:`,
+    '',
+    ...rows,
+    '',
+    'Nếu thông tin chính xác, chọn Xác nhận gửi đơn.',
+  ].join('\n');
+}
+
 async function relayOpenVieChat(config, state, chatId, text) {
   const chatSession = await getChatSession(config, state, chatId);
   const answer = await openVieRequest(
@@ -258,11 +300,21 @@ async function relayOpenVieChat(config, state, chatId, text) {
     await saveChatSessions(state);
     extra = {
       reply_markup: {
-        inline_keyboard: [[{ text: 'Xác nhận gửi đơn', callback_data: `openvie:execute:${action.actionId}` }]],
+        inline_keyboard: [[
+          { text: 'Xác nhận gửi đơn', callback_data: `openvie:execute:${action.actionId}` },
+          { text: 'Sửa lại', callback_data: `openvie:edit:${action.actionId}` },
+        ]],
       },
     };
   }
-  await sendLongMessage(config, chatId, answer?.content, extra);
+  const review = actionReview(action);
+  const responseText = [answer?.content, review].filter(Boolean).join('\n\n');
+  const messages = await sendLongMessage(config, chatId, responseText, extra);
+  const pending = chatSession.pendingActions?.[action?.actionId];
+  if (pending) {
+    pending.telegramMessageIds = messages.map((message) => message?.message_id).filter(Number.isSafeInteger);
+    await saveChatSessions(state);
+  }
 }
 
 async function executeOpenVieAction(config, state, chatId, actionId) {
@@ -295,12 +347,74 @@ async function executeOpenVieAction(config, state, chatId, actionId) {
   }
   delete chatSession.pendingActions[actionId];
   await saveChatSessions(state);
+  await deleteTelegramMessages(config, chatId, pending.telegramMessageIds);
   const recordId = recordIdFromAction(result);
   if (recordId) {
-    state.submissions[recordId] = { chatId, processId: null, createdAt: new Date().toISOString() };
+    state.submissions[recordId] = {
+      chatId,
+      processId: null,
+      createdAt: new Date().toISOString(),
+      status: 'PENDING',
+      notifiedStatus: null,
+    };
     await writePrivateJson(SUBMISSIONS_FILE, state.submissions);
   }
   await sendLongMessage(config, chatId, result?.content || 'Đã gửi yêu cầu tới OpenVie.');
+}
+
+async function reviseOpenVieAction(config, state, chatId, actionId) {
+  const chatSession = state.chatSessions[String(chatId)];
+  const pending = chatSession?.pendingActions?.[actionId];
+  if (!pending) {
+    await sendMessage(config, chatId, 'Yêu cầu này không còn hiệu lực. Hãy gửi lại thông tin cho OpenVie.');
+    return;
+  }
+  await deleteTelegramMessages(config, chatId, pending.telegramMessageIds);
+  delete chatSession.pendingActions[actionId];
+  await saveChatSessions(state);
+  await sendMessage(config, chatId, [
+    'Hãy nhắn lại thông tin cần sửa, ví dụ: “đổi ngày bắt đầu thành 2026-11-20”.',
+    'Mình sẽ gửi bản xem lại mới trước khi tạo đơn.',
+  ].join('\n'));
+}
+
+function approvalStatus(record) {
+  const status = record?.runtime?.approvalStatus;
+  return ['APPROVED', 'REJECTED'].includes(status) ? status : 'PENDING';
+}
+
+function approvalStatusLabel(status) {
+  if (status === 'APPROVED') return 'ĐÃ DUYỆT';
+  if (status === 'REJECTED') return 'ĐÃ TỪ CHỐI';
+  return 'ĐANG CHỜ DUYỆT';
+}
+
+async function sendLeaveStatuses(config, state, chatId) {
+  const submissions = Object.entries(state.submissions)
+    .filter(([, submission]) => String(submission?.chatId) === String(chatId));
+  if (submissions.length === 0) {
+    await sendMessage(config, chatId, 'Bạn chưa có đơn nào được gửi từ cuộc trò chuyện này.');
+    return;
+  }
+
+  const lines = ['Trạng thái đơn nghỉ:'];
+  let changed = false;
+  for (const [recordId, submission] of submissions) {
+    let status = submission.status || 'PENDING';
+    try {
+      const record = await openVieRequest(config, 'GET', apiPath(config, recordId));
+      status = approvalStatus(record);
+      if (submission.status !== status) {
+        submission.status = status;
+        changed = true;
+      }
+    } catch (error) {
+      console.error(`Could not load status for ${recordId}: ${errorLabel(error)}`);
+    }
+    lines.push(`Đơn #${recordId.slice(0, 8)}: ${approvalStatusLabel(status)}.`);
+  }
+  if (changed) await writePrivateJson(SUBMISSIONS_FILE, state.submissions);
+  await sendMessage(config, chatId, lines.join('\n'));
 }
 
 async function handleMessage(config, state, message) {
@@ -309,7 +423,7 @@ async function handleMessage(config, state, message) {
   const text = message.text.trim();
   const command = text.startsWith('/') ? text.split(/\s+/, 1)[0].split('@', 1)[0] : null;
   if (command === '/start') {
-    await sendMessage(config, chatId, 'Chào bạn! Hãy nhắn tự nhiên như trên OpenVie, ví dụ: “Tôi muốn xin nghỉ”. Tôi sẽ chuyển hội thoại đến OpenVie và gửi lại câu trả lời tại đây. Dùng /new để bắt đầu cuộc trò chuyện mới.');
+    await sendMessage(config, chatId, 'Chào bạn! Hãy nhắn tự nhiên như trên OpenVie, ví dụ: “Tôi muốn xin nghỉ”. Tôi sẽ chuyển hội thoại đến OpenVie và gửi lại câu trả lời tại đây. Dùng /new để bắt đầu cuộc trò chuyện mới hoặc /status để xem trạng thái đơn.');
     return;
   }
   if (command === '/new' || command === '/cancel') {
@@ -322,8 +436,12 @@ async function handleMessage(config, state, message) {
     await relayOpenVieChat(config, state, chatId, 'Tôi muốn xin nghỉ');
     return;
   }
+  if (command === '/status') {
+    await sendLeaveStatuses(config, state, chatId);
+    return;
+  }
   if (command) {
-    await sendMessage(config, chatId, 'Lệnh không hỗ trợ. Hãy nhắn nội dung bình thường, dùng /leave để bắt đầu hoặc /new để tạo cuộc trò chuyện mới.');
+    await sendMessage(config, chatId, 'Lệnh không hỗ trợ. Hãy nhắn nội dung bình thường, dùng /leave để bắt đầu, /status để xem trạng thái, hoặc /new để tạo cuộc trò chuyện mới.');
     return;
   }
   await relayOpenVieChat(config, state, chatId, text);
@@ -338,6 +456,10 @@ async function handleCallback(config, state, callback) {
     await executeOpenVieAction(config, state, chatId, data.slice('openvie:execute:'.length));
     return;
   }
+  if (data.startsWith('openvie:edit:')) {
+    await reviseOpenVieAction(config, state, chatId, data.slice('openvie:edit:'.length));
+    return;
+  }
   await sendMessage(config, chatId, 'Nút này không còn hiệu lực. Hãy gửi lại thông tin cho OpenVie.');
 }
 
@@ -346,13 +468,12 @@ async function pollSubmissionStatuses(config, state) {
     if (!submission?.chatId) continue;
     try {
       const record = await openVieRequest(config, 'GET', apiPath(config, recordId));
-      const status = record?.runtime?.approvalStatus;
-      let message;
-      if (status === 'APPROVED') message = `Đơn #${recordId.slice(0, 8)}: ĐÃ DUYỆT.`;
-      if (status === 'REJECTED') message = `Đơn #${recordId.slice(0, 8)}: ĐÃ TỪ CHỐI.`;
-      if (!message) continue;
-      await sendMessage(config, submission.chatId, message);
-      delete state.submissions[recordId];
+      const status = approvalStatus(record);
+      submission.status = status;
+      if (['APPROVED', 'REJECTED'].includes(status) && submission.notifiedStatus !== status) {
+        await sendMessage(config, submission.chatId, `Đơn #${recordId.slice(0, 8)}: ${approvalStatusLabel(status)}.`);
+        submission.notifiedStatus = status;
+      }
       await writePrivateJson(SUBMISSIONS_FILE, state.submissions);
     } catch (error) {
       console.error(`Status poll for one submission failed: ${errorLabel(error)}`);
