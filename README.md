@@ -1,12 +1,12 @@
 # Telegram Leave Bot
 
-Repository độc lập này nhận đơn nghỉ phép từ Telegram, tạo `leave_requests` qua OpenVie HTTP API và nhắn kết quả duyệt/từ chối trở lại đúng chat đã gửi đơn. Không cần sửa OpenVie: workflow OpenVie tự chạy hook `onCreate` khi record được tạo.
+Repository này biến Telegram thành một cửa sổ OpenVie Chat: mỗi Telegram chat có một OpenVie chat session riêng. Người dùng nhắn tự nhiên, ví dụ `Tôi muốn xin nghỉ`; bot chuyển tin nhắn sang OpenVie và trả lại câu trả lời/form của assistant vào Telegram. Khi OpenVie trả action tạo đơn hợp lệ, bot hiển thị nút **Xác nhận gửi đơn**; đơn chỉ được tạo sau khi người dùng bấm nút đó.
 
 Bot dùng Node.js 22+, JavaScript ESM và `fetch` có sẵn, không có npm dependency. Nó dùng Telegram long-polling, vì vậy không cần webhook hay URL public.
 
 ## Bảo mật
 
-Không commit hoặc gửi token vào chat/BotFather. `.env`, `submissions.json` và trạng thái offset Telegram đều đã được `.gitignore`. Runtime tạo các file trạng thái với quyền chỉ owner được đọc/ghi (`0600`). Bot không ghi Telegram token hay OpenVie API key vào log, và cũng không đưa chúng vào tin nhắn Telegram.
+Không commit hoặc gửi token vào chat/BotFather. `.env`, `submissions.json`, `chat-sessions.json` và trạng thái offset Telegram đều đã được `.gitignore`. Runtime tạo các file trạng thái với quyền chỉ owner được đọc/ghi (`0600`). Bot không ghi Telegram token hay OpenVie API key vào log, và cũng không đưa chúng vào tin nhắn Telegram.
 
 Token Telegram chỉ được dùng gọi `https://api.telegram.org/bot<TOKEN>/...`. OpenVie API key chỉ được gửi qua `Authorization: Bearer <ovk_...>` tới OpenVie.
 
@@ -14,7 +14,7 @@ Token Telegram chỉ được dùng gọi `https://api.telegram.org/bot<TOKEN>/.
 
 1. Mở Telegram, tìm **@BotFather**, gửi `/newbot` và làm theo hướng dẫn để đặt tên bot.
 2. BotFather trả về token bot một lần. Lưu token đó vào `TELEGRAM_BOT_TOKEN` trong `.env`; không gửi OpenVie API key cho BotFather.
-3. Mở chat với bot mới và gửi `/start`, sau đó dùng `/leave`.
+3. Mở chat với bot mới, gửi `/start`, sau đó nhắn `Tôi muốn xin nghỉ` như khi dùng OpenVie Chat. Dùng `/new` để tạo cuộc trò chuyện mới; `/leave` là lối tắt gửi câu `Tôi muốn xin nghỉ`.
 
 ## Tạo OpenVie API key
 
@@ -29,12 +29,14 @@ Content-Type: application/json
 ```json
 {
   "name": "Telegram leave demo",
-  "workspaceId": "73940cfb-f2fa-43fb-b3de-18b4b0015a95",
+  "workspaceId": "<workspace-id-của-OpenVie-Chat>",
   "role": "WORKSPACE_ADMIN"
 }
 ```
 
 Response chỉ trả `ovk_...` một lần. Lưu ngay giá trị đó vào `OPENVIE_API_KEY` trong `.env`, không commit hay chia sẻ nó.
+
+API key phải thuộc cùng workspace với OpenVie Chat/Leave Request Management. Admin cần chuyển Yaak sang workspace này trước khi xem và duyệt task.
 
 ## Chạy bot
 
@@ -50,20 +52,22 @@ Các biến cấu hình đều chỉ được đọc từ `.env`:
 TELEGRAM_BOT_TOKEN=
 OPENVIE_API_KEY=
 OPENVIE_BASE_URL=https://premonumental-melita-uncontained.ngrok-free.dev
-OPENVIE_APP_KIND=hint-leave-management
+OPENVIE_APP_KIND=leave-requests
 OPENVIE_ENTITY=leave_requests
 POLL_INTERVAL_MS=5000
 ```
 
 ## Luồng sử dụng
 
-`/leave` lần lượt hỏi họ tên, email (có kiểm tra), loại nghỉ (inline keyboard), ngày bắt đầu/kết thúc (`YYYY-MM-DD`), số ngày dương và lý do. Bot tạo record bằng:
+Bot dùng ba API OpenVie:
 
 ```text
-POST /api/v1/bizapp-data/hint-leave-management/leave_requests
+POST /api/v1/chat/sessions
+POST /api/v1/chat/sessions/{sessionId}/messages
+POST /api/v1/chat/actions/execute
 ```
 
-Payload được bọc trong `{ "payload": ... }`; bot không gọi endpoint `/submit`. Sau khi thành công bot trả `recordId`, `processId` và thông báo chờ admin duyệt trên Yaak.
+Hai API đầu dùng assistant mặc định của workspace và trả cùng nội dung/action card như OpenVie Chat. Telegram hiển thị nội dung card dưới dạng tin nhắn; khi action có trạng thái `PROPOSED` (hoặc `VALID`), nút xác nhận của Telegram mới gọi API execute. Nhờ đó một tin nhắn chưa đủ thông tin sẽ không tạo bản ghi nghỉ phép.
 
 Admin duyệt thủ công trong Yaak, không qua Telegram:
 
@@ -88,7 +92,7 @@ Hoặc đổi `APPROVE` thành `REJECT`. Bot không có nút Approve/Reject và 
 Sau khi tạo đơn, bot lưu `recordId -> chatId` trong `submissions.json`. Cứ mỗi `POLL_INTERVAL_MS`, bot đọc record từ:
 
 ```text
-GET /api/v1/bizapp-data/hint-leave-management/leave_requests/{recordId}
+GET /api/v1/bizapp-data/leave-requests/leave_requests/{recordId}
 ```
 
 Khi `runtime.approvalStatus` là `APPROVED` hoặc `REJECTED`, bot báo kết quả tới chat đã gửi và xóa mapping sau khi gửi thành công. Khi restart, bot đọc lại file này nên các đơn chờ vẫn được theo dõi.

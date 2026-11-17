@@ -3,12 +3,7 @@ import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 const ENV_FILE = '.env';
 const SUBMISSIONS_FILE = 'submissions.json';
 const UPDATE_OFFSET_FILE = 'update-offset.json';
-const LEAVE_TYPES = {
-  annual_leave: 'Nghỉ phép năm',
-  sick_leave: 'Nghỉ ốm',
-  maternity_leave: 'Nghỉ thai sản',
-  remote_work: 'Làm việc từ xa',
-};
+const CHAT_SESSIONS_FILE = 'chat-sessions.json';
 
 class ServiceError extends Error {}
 
@@ -107,6 +102,14 @@ async function loadSubmissions() {
   return data;
 }
 
+async function loadChatSessions() {
+  const data = await readJson(CHAT_SESSIONS_FILE, {});
+  if (!data || Array.isArray(data) || typeof data !== 'object') {
+    throw new ServiceError('chat-sessions.json must contain an object.');
+  }
+  return data;
+}
+
 async function loadOffset() {
   const data = await readJson(UPDATE_OFFSET_FILE, { offset: 0 });
   return Number.isSafeInteger(data?.offset) && data.offset >= 0 ? data.offset : 0;
@@ -117,7 +120,12 @@ function apiPath(config, recordId = '') {
   return recordId ? `${base}/${encodeURIComponent(recordId)}` : base;
 }
 
-async function openVieRequest(config, method, url, body) {
+function chatSessionPath(sessionId = '') {
+  const base = '/api/v1/chat/sessions';
+  return sessionId ? `${base}/${encodeURIComponent(sessionId)}` : base;
+}
+
+async function openVieRequest(config, method, url, body, extraHeaders = {}) {
   let response;
   try {
     response = await fetch(url, {
@@ -125,13 +133,25 @@ async function openVieRequest(config, method, url, body) {
       headers: {
         Authorization: `Bearer ${config.openVieApiKey}`,
         ...(body ? { 'Content-Type': 'application/json' } : {}),
+        ...extraHeaders,
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
   } catch {
     throw new ServiceError('OpenVie request failed. Check network and OPENVIE_BASE_URL.');
   }
-  if (!response.ok) throw new ServiceError(`OpenVie returned HTTP ${response.status}.`);
+  if (!response.ok) {
+    let detail = '';
+    try {
+      const error = await response.json();
+      if (typeof error?.message === 'string' && error.message.trim()) {
+        detail = ` ${error.message.trim()}`;
+      }
+    } catch {
+      // Preserve the HTTP status when the server did not return a JSON error body.
+    }
+    throw new ServiceError(`OpenVie returned HTTP ${response.status}.${detail}`);
+  }
   try {
     return await response.json();
   } catch {
@@ -161,116 +181,126 @@ async function telegramRequest(config, method, payload) {
   return data.result;
 }
 
-function askText(step) {
-  return {
-    employee_name: 'Họ và tên nhân viên?',
-    email: 'Email công ty?',
-    start_date: 'Ngày bắt đầu (YYYY-MM-DD)?',
-    end_date: 'Ngày kết thúc (YYYY-MM-DD)?',
-    days: 'Số ngày nghỉ (số dương)?',
-    reason: 'Lý do nghỉ?',
-  }[step];
-}
-
-function isValidDate(value) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const [year, month, day] = value.split('-').map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day));
-  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
-}
-
-function leaveKeyboard() {
-  return {
-    inline_keyboard: Object.entries(LEAVE_TYPES).map(([type, label]) => [
-      { text: label, callback_data: `leave:${type}` },
-    ]),
-  };
-}
-
 async function sendMessage(config, chatId, text, extra = {}) {
   return telegramRequest(config, 'sendMessage', { chat_id: chatId, text, ...extra });
 }
 
-async function submitLeave(config, state, chatId, form) {
-  if (form.submitting) return;
-  form.submitting = true;
-  try {
-    const record = await openVieRequest(config, 'POST', apiPath(config), { payload: form.data });
-    if (!record?.id) throw new ServiceError('OpenVie created a response without a record ID.');
-    state.submissions[record.id] = {
-      chatId,
-      processId: record.runtime?.processId ?? null,
-      createdAt: new Date().toISOString(),
-    };
-    await writePrivateJson(SUBMISSIONS_FILE, state.submissions);
-    state.forms.delete(chatId);
-    const processId = record.runtime?.processId ?? '(không có trong phản hồi)';
-    await sendMessage(
-      config,
-      chatId,
-      `Đơn đã gửi, chờ admin duyệt trên Yaak.\nrecordId: ${record.id}\nprocessId: ${processId}`,
-    );
-  } catch (error) {
-    form.submitting = false;
-    await sendMessage(config, chatId, `Không thể gửi đơn: ${errorLabel(error)} Vui lòng thử lại hoặc /cancel.`).catch(() => {});
+function splitTelegramText(text) {
+  const chunks = [];
+  let remaining = String(text || '').trim() || 'OpenVie không trả về nội dung.';
+  while (remaining.length > 4096) {
+    const breakpoint = Math.max(remaining.lastIndexOf('\n', 4000), remaining.lastIndexOf(' ', 4000));
+    const index = breakpoint > 0 ? breakpoint : 4096;
+    chunks.push(remaining.slice(0, index));
+    remaining = remaining.slice(index).trimStart();
+  }
+  chunks.push(remaining);
+  return chunks;
+}
+
+async function sendLongMessage(config, chatId, text, extra = {}) {
+  const chunks = splitTelegramText(text);
+  for (let index = 0; index < chunks.length; index += 1) {
+    await sendMessage(config, chatId, chunks[index], index === chunks.length - 1 ? extra : {});
   }
 }
 
-async function handleFormText(config, state, chatId, text) {
-  const form = state.forms.get(chatId);
-  if (!form || form.submitting) return false;
-  const value = text.trim();
-  const { step } = form;
+async function saveChatSessions(state) {
+  await writePrivateJson(CHAT_SESSIONS_FILE, state.chatSessions);
+}
 
-  if (step === 'employee_name' || step === 'reason') {
-    if (!value) {
-      await sendMessage(config, chatId, 'Trường này không được để trống.');
-      return true;
-    }
-    form.data[step] = value;
-  } else if (step === 'email') {
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
-      await sendMessage(config, chatId, 'Email chưa hợp lệ. Hãy nhập lại.');
-      return true;
-    }
-    form.data.email = value;
-  } else if (step === 'start_date' || step === 'end_date') {
-    if (!isValidDate(value)) {
-      await sendMessage(config, chatId, 'Ngày chưa hợp lệ. Dùng đúng định dạng YYYY-MM-DD.');
-      return true;
-    }
-    if (step === 'end_date' && value < form.data.start_date) {
-      await sendMessage(config, chatId, 'Ngày kết thúc không thể trước ngày bắt đầu.');
-      return true;
-    }
-    form.data[step] = value;
-  } else if (step === 'days') {
-    const days = Number(value);
-    if (!Number.isFinite(days) || days <= 0) {
-      await sendMessage(config, chatId, 'Số ngày phải là một số dương.');
-      return true;
-    }
-    form.data.days = days;
-  }
+async function getChatSession(config, state, chatId) {
+  const key = String(chatId);
+  const current = state.chatSessions[key];
+  if (current?.sessionId) return current;
 
-  const next = {
-    employee_name: 'email',
-    email: 'leave_type',
-    start_date: 'end_date',
-    end_date: 'days',
-    days: 'reason',
-  }[step];
-  if (step === 'reason') {
-    await submitLeave(config, state, chatId, form);
-    return true;
+  const session = await openVieRequest(
+    config,
+    'POST',
+    `${config.openVieBaseUrl}${chatSessionPath()}`,
+    { locale: 'vi', metadata: { channel: 'telegram', telegram_chat_id: key } },
+    { Accept: 'application/json' },
+  );
+  if (!session?.id) throw new ServiceError('OpenVie did not create a chat session.');
+  state.chatSessions[key] = { sessionId: session.id, pendingActions: {} };
+  await saveChatSessions(state);
+  return state.chatSessions[key];
+}
+
+function recordIdFromAction(result) {
+  const candidates = [
+    result?.recordId,
+    result?.record?.id,
+    result?.action?.result?.recordId,
+    result?.action?.result?.record?.id,
+  ];
+  return candidates.find((value) => typeof value === 'string' && value) ?? null;
+}
+
+async function relayOpenVieChat(config, state, chatId, text) {
+  const chatSession = await getChatSession(config, state, chatId);
+  const answer = await openVieRequest(
+    config,
+    'POST',
+    `${config.openVieBaseUrl}${chatSessionPath(chatSession.sessionId)}/messages`,
+    { content: text },
+    { Accept: 'application/json' },
+  );
+  const action = answer?.action;
+  let extra = {};
+  if (
+    action?.type === 'bizapp_action'
+    && ['VALID', 'PROPOSED'].includes(action.status)
+    && typeof action.actionId === 'string'
+  ) {
+    chatSession.pendingActions ??= {};
+    chatSession.pendingActions[action.actionId] = { messageId: answer.id ?? null, createdAt: new Date().toISOString() };
+    await saveChatSessions(state);
+    extra = {
+      reply_markup: {
+        inline_keyboard: [[{ text: 'Xác nhận gửi đơn', callback_data: `openvie:execute:${action.actionId}` }]],
+      },
+    };
   }
-  form.step = next;
-  if (next === 'leave_type') {
-    await sendMessage(config, chatId, 'Chọn loại nghỉ:', { reply_markup: leaveKeyboard() });
-  } else {
-    await sendMessage(config, chatId, askText(next));
+  await sendLongMessage(config, chatId, answer?.content, extra);
+}
+
+async function executeOpenVieAction(config, state, chatId, actionId) {
+  const chatSession = state.chatSessions[String(chatId)];
+  const pending = chatSession?.pendingActions?.[actionId];
+  if (!pending) {
+    await sendMessage(config, chatId, 'Yêu cầu này không còn hiệu lực. Hãy gửi lại thông tin cho OpenVie.');
+    return;
   }
-  return true;
+  if (pending.executing) {
+    await sendMessage(config, chatId, 'Yêu cầu đang được gửi tới OpenVie.');
+    return;
+  }
+  pending.executing = true;
+  await saveChatSessions(state);
+  let result;
+  try {
+    result = await openVieRequest(
+      config,
+      'POST',
+      `${config.openVieBaseUrl}/api/v1/chat/actions/execute`,
+      { actionId, ...(pending.messageId ? { messageId: pending.messageId } : {}) },
+      { Accept: 'application/json' },
+    );
+  } catch (error) {
+    delete pending.executing;
+    await saveChatSessions(state);
+    await sendMessage(config, chatId, `Không thể gửi đơn: ${errorLabel(error)} Vui lòng thử lại.`);
+    return;
+  }
+  delete chatSession.pendingActions[actionId];
+  await saveChatSessions(state);
+  const recordId = recordIdFromAction(result);
+  if (recordId) {
+    state.submissions[recordId] = { chatId, processId: null, createdAt: new Date().toISOString() };
+    await writePrivateJson(SUBMISSIONS_FILE, state.submissions);
+  }
+  await sendLongMessage(config, chatId, result?.content || 'Đã gửi yêu cầu tới OpenVie.');
 }
 
 async function handleMessage(config, state, message) {
@@ -279,25 +309,24 @@ async function handleMessage(config, state, message) {
   const text = message.text.trim();
   const command = text.startsWith('/') ? text.split(/\s+/, 1)[0].split('@', 1)[0] : null;
   if (command === '/start') {
-    await sendMessage(config, chatId, 'Chào bạn! Dùng /leave để gửi đơn nghỉ phép. Bạn có thể dùng /cancel để hủy form đang nhập.');
+    await sendMessage(config, chatId, 'Chào bạn! Hãy nhắn tự nhiên như trên OpenVie, ví dụ: “Tôi muốn xin nghỉ”. Tôi sẽ chuyển hội thoại đến OpenVie và gửi lại câu trả lời tại đây. Dùng /new để bắt đầu cuộc trò chuyện mới.');
+    return;
+  }
+  if (command === '/new' || command === '/cancel') {
+    delete state.chatSessions[String(chatId)];
+    await saveChatSessions(state);
+    await sendMessage(config, chatId, 'Đã bắt đầu cuộc trò chuyện mới với OpenVie.');
     return;
   }
   if (command === '/leave') {
-    state.forms.set(chatId, { step: 'employee_name', data: {} });
-    await sendMessage(config, chatId, askText('employee_name'));
-    return;
-  }
-  if (command === '/cancel') {
-    if (state.forms.delete(chatId)) await sendMessage(config, chatId, 'Đã hủy form nghỉ phép.');
-    else await sendMessage(config, chatId, 'Bạn không có form nào đang nhập.');
+    await relayOpenVieChat(config, state, chatId, 'Tôi muốn xin nghỉ');
     return;
   }
   if (command) {
-    await sendMessage(config, chatId, 'Lệnh không hỗ trợ. Dùng /leave để bắt đầu hoặc /cancel để hủy.');
+    await sendMessage(config, chatId, 'Lệnh không hỗ trợ. Hãy nhắn nội dung bình thường, dùng /leave để bắt đầu hoặc /new để tạo cuộc trò chuyện mới.');
     return;
   }
-  const consumed = await handleFormText(config, state, chatId, text);
-  if (!consumed) await sendMessage(config, chatId, 'Dùng /leave để gửi đơn nghỉ phép.');
+  await relayOpenVieChat(config, state, chatId, text);
 }
 
 async function handleCallback(config, state, callback) {
@@ -305,15 +334,11 @@ async function handleCallback(config, state, callback) {
   const data = callback?.data;
   if (!callback?.id || !chatId || typeof data !== 'string') return;
   await telegramRequest(config, 'answerCallbackQuery', { callback_query_id: callback.id }).catch(() => {});
-  const type = data.startsWith('leave:') ? data.slice('leave:'.length) : '';
-  const form = state.forms.get(chatId);
-  if (!form || form.step !== 'leave_type' || !LEAVE_TYPES[type]) {
-    await sendMessage(config, chatId, 'Lựa chọn này không còn hiệu lực. Dùng /leave để bắt đầu lại.');
+  if (data.startsWith('openvie:execute:')) {
+    await executeOpenVieAction(config, state, chatId, data.slice('openvie:execute:'.length));
     return;
   }
-  form.data.leave_type = type;
-  form.step = 'start_date';
-  await sendMessage(config, chatId, askText('start_date'));
+  await sendMessage(config, chatId, 'Nút này không còn hiệu lực. Hãy gửi lại thông tin cho OpenVie.');
 }
 
 async function pollSubmissionStatuses(config, state) {
@@ -381,8 +406,8 @@ async function main() {
   }
   const config = buildConfig(await readEnvFile());
   const state = {
-    forms: new Map(),
     submissions: await loadSubmissions(),
+    chatSessions: await loadChatSessions(),
     offset: await loadOffset(),
   };
   console.info('Telegram leave bot started.');
