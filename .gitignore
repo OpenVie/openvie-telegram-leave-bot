@@ -1,10 +1,11 @@
-.env
-submissions.json
-submissions.json.tmp
-update-offset.json
-update-offset.json.tmp
-chat-sessions.json
-chat-sessions.json.tmp
-node_modules/
-npm-debug.log*
+/.env
+/submissions.json
+/submissions.json.tmp
+/update-offset.json
+/update-offset.json.tmp
+/chat-sessions.json
+/chat-sessions.json.tmp
+/node_modules/
+/npm-debug.log*
+.DS_Store
 

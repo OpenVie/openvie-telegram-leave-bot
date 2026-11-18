@@ -1,0 +1,15 @@
+{
+  "name": "openvie-telegram-leave-bot",
+  "version": "1.0.0",
+  "description": "Telegram interface for OpenVie leave requests.",
+  "type": "module",
+  "private": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node bot.mjs",
+    "check": "node --check bot.mjs"
+  },
+  "license": "MIT"
+}

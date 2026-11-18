@@ -423,10 +423,10 @@ async function handleMessage(config, state, message) {
   const text = message.text.trim();
   const command = text.startsWith('/') ? text.split(/\s+/, 1)[0].split('@', 1)[0] : null;
   if (command === '/start') {
-    await sendMessage(config, chatId, 'Chào bạn! Hãy nhắn tự nhiên như trên OpenVie, ví dụ: “Tôi muốn xin nghỉ”. Tôi sẽ chuyển hội thoại đến OpenVie và gửi lại câu trả lời tại đây. Dùng /new để bắt đầu cuộc trò chuyện mới hoặc /status để xem trạng thái đơn.');
+    await sendMessage(config, chatId, 'Chào bạn! Hãy nhắn tự nhiên như trên OpenVie, ví dụ: “Tôi muốn xin nghỉ”. Tôi sẽ chuyển hội thoại đến OpenVie và gửi lại câu trả lời tại đây. Dùng /cancel để hủy nội dung đang soạn hoặc /status để xem trạng thái đơn.');
     return;
   }
-  if (command === '/new' || command === '/cancel') {
+  if (command === '/cancel') {
     delete state.chatSessions[String(chatId)];
     await saveChatSessions(state);
     await sendMessage(config, chatId, 'Đã bắt đầu cuộc trò chuyện mới với OpenVie.');
@@ -441,7 +441,7 @@ async function handleMessage(config, state, message) {
     return;
   }
   if (command) {
-    await sendMessage(config, chatId, 'Lệnh không hỗ trợ. Hãy nhắn nội dung bình thường, dùng /leave để bắt đầu, /status để xem trạng thái, hoặc /new để tạo cuộc trò chuyện mới.');
+    await sendMessage(config, chatId, 'Lệnh không hỗ trợ. Hãy nhắn nội dung bình thường, dùng /leave để bắt đầu, /status để xem trạng thái, hoặc /cancel để hủy nội dung đang soạn.');
     return;
   }
   await relayOpenVieChat(config, state, chatId, text);
@@ -522,8 +522,8 @@ async function runStatusLoop(config, state) {
 }
 
 async function main() {
-  if (Number(process.versions.node.split('.')[0]) < 22) {
-    throw new ServiceError('Node.js 22 or newer is required.');
+  if (Number(process.versions.node.split('.')[0]) < 20) {
+    throw new ServiceError('Node.js 20 or newer is required.');
   }
   const config = buildConfig(await readEnvFile());
   const state = {
@@ -531,7 +531,7 @@ async function main() {
     chatSessions: await loadChatSessions(),
     offset: await loadOffset(),
   };
-  console.info('Telegram leave bot started.');
+  console.info('OpenVie Leave Relay started.');
   await Promise.all([runTelegramLoop(config, state), runStatusLoop(config, state)]);
 }
 
