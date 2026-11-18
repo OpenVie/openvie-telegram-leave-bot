@@ -84,17 +84,17 @@ Không commit hoặc gửi token, API key hay file trạng thái vào chat. Nế
 
 ```mermaid
 flowchart TD
-    user[Người dùng] --> telegram[Nhắn bot trên Telegram]
-    telegram --> chat[OpenVie kiểm tra thông tin]
+    user[Người dùng] --> telegram[Nhắn bot<br/>trên Telegram]
+    telegram --> chat[OpenVie kiểm tra<br/>thông tin]
     chat --> complete{Đủ thông tin?}
-    complete -- Chưa --> ask[Bot hỏi thêm thông tin]
+    complete -- Chưa --> ask[Bot hỏi thêm<br/>thông tin]
     ask --> user
-    complete -- Đủ --> preview[Bot gửi bản xem lại]
-    preview --> choice{Người dùng chọn}
+    complete -- Đủ --> preview[Bot gửi bản<br/>xem lại]
+    preview --> choice{Người dùng<br/>chọn}
     choice -- Sửa lại --> user
-    choice -- Xác nhận --> request[OpenVie tạo đơn nghỉ phép]
-    request --> approval[OpenVie xử lý phê duyệt]
-    approval --> notification[Bot gửi trạng thái về Telegram]
+    choice -- Xác nhận --> request[OpenVie tạo<br/>đơn nghỉ phép]
+    request --> approval[OpenVie xử lý<br/>phê duyệt]
+    approval --> notification[Bot gửi trạng thái<br/>về Telegram]
 ```
 
 ### Giấy phép
@@ -182,17 +182,17 @@ Do not commit or share tokens, API keys, or state files in chat. If a token has 
 
 ```mermaid
 flowchart TD
-    user[User] --> telegram[Messages the bot on Telegram]
-    telegram --> chat[OpenVie checks request details]
+    user[User] --> telegram[Message the bot<br/>on Telegram]
+    telegram --> chat[OpenVie checks<br/>request details]
     chat --> complete{Details complete?}
-    complete -- No --> ask[Bot requests more details]
+    complete -- No --> ask[Bot requests<br/>more details]
     ask --> user
-    complete -- Yes --> preview[Bot sends a preview]
-    preview --> choice{User chooses}
+    complete -- Yes --> preview[Bot sends<br/>a preview]
+    preview --> choice{User<br/>chooses}
     choice -- Edit --> user
-    choice -- Confirm --> request[OpenVie creates the leave request]
-    request --> approval[OpenVie processes approval]
-    approval --> notification[Bot sends the status to Telegram]
+    choice -- Confirm --> request[OpenVie creates<br/>the leave request]
+    request --> approval[OpenVie processes<br/>approval]
+    approval --> notification[Bot sends the status<br/>to Telegram]
 ```
 
 ### License
