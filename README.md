@@ -12,9 +12,8 @@ Submit and track leave requests from Telegram, powered by OpenVie.
 
 ## Tiếng Việt
 
-OpenVie Leave Bot giúp nhân viên gửi và theo dõi đơn nghỉ phép ngay trong Telegram. Thông tin được xử lý trên OpenVie; Telegram chỉ là nơi trao đổi tiện hơn.
-
-### Dành cho nhân viên
+OpenVie Leave Bot giúp bạn gửi và theo dõi đơn nghỉ phép ngay trong Telegram.
+### Hướng dẫn sử dụng
 
 Mở chat với bot trên Telegram rồi gửi `/start`. Bạn có thể bắt đầu bằng `/leave` hoặc nhắn như bình thường, ví dụ:
 
@@ -30,18 +29,13 @@ Bot sẽ hỏi thêm nếu thiếu thông tin và gửi lại bản xem trước
 
 Khi đơn được duyệt hoặc từ chối trên OpenVie, bot sẽ nhắn kết quả vào Telegram.
 
-### Dành cho tổ chức
+### Giới thiệu nhanh
 
-Bot phù hợp khi đội ngũ đã dùng OpenVie để quản lý quy trình nghỉ phép nhưng muốn nhân viên gửi đơn từ Telegram.
+Đây là bot Telegram kết nối với OpenVie để tạo và theo dõi đơn nghỉ phép. Chỉ cần cấu hình token, API key rồi chạy bot bằng Node.js — bot dùng long polling nên không cần webhook hay URL public.
 
-- Mỗi cuộc chat Telegram có một phiên làm việc OpenVie độc lập.
-- Đơn chỉ được tạo sau thao tác xác nhận của người gửi.
-- Quyền duyệt vẫn ở OpenVie; bot không duyệt thay quản trị viên.
-- Bot dùng Telegram long polling, không cần webhook hay URL public.
+### Cài đặt và chạy
 
-### Thiết lập
-
-Bạn cần Node.js 20 trở lên, một Telegram Bot Token từ [@BotFather](https://t.me/BotFather), và OpenVie API key có quyền tạo leave request trong workspace cần dùng.
+Bạn cần Node.js 20 trở lên, một Telegram Bot Token từ [@BotFather](https://t.me/BotFather), và OpenVie API key có quyền tạo leave request.
 
 ```bash
 git clone <repository-url>
@@ -49,7 +43,7 @@ cd <source-directory>
 cp .env.example .env
 ```
 
-Điền thông tin môi trường vào `.env`:
+Điền token và thông tin OpenVie vào `.env`:
 
 ```env
 TELEGRAM_BOT_TOKEN=123456:replace-this
@@ -67,7 +61,7 @@ npm run check
 npm start
 ```
 
-Bot không có package dependency, nên không cần `npm install` để chạy. Khi triển khai lâu dài, hãy chạy `npm start` bằng service manager phù hợp với hạ tầng của bạn.
+Bot không có package dependency, nên không cần `npm install`. Để dừng bot, nhấn `Ctrl+C` trong terminal đang chạy.
 
 ### Cấu hình
 
@@ -90,16 +84,16 @@ Không commit hoặc gửi token, API key hay file trạng thái vào chat. Nế
 
 ```mermaid
 flowchart TD
-    employee[Nhân viên] --> telegram[Nhắn bot trên Telegram]
+    user[Người dùng] --> telegram[Nhắn bot trên Telegram]
     telegram --> chat[OpenVie kiểm tra thông tin]
     chat --> complete{Đủ thông tin?}
     complete -- Chưa --> ask[Bot hỏi thêm thông tin]
-    ask --> employee
+    ask --> user
     complete -- Đủ --> preview[Bot gửi bản xem lại]
     preview --> choice{Người dùng chọn}
-    choice -- Sửa lại --> employee
+    choice -- Sửa lại --> user
     choice -- Xác nhận --> request[OpenVie tạo đơn nghỉ phép]
-    request --> approval[Quản trị viên duyệt trên OpenVie]
+    request --> approval[OpenVie xử lý phê duyệt]
     approval --> notification[Bot gửi trạng thái về Telegram]
 ```
 
@@ -115,9 +109,9 @@ Mã nguồn được phát hành theo giấy phép MIT. Bạn có thể sử d�
 
 ## English
 
-OpenVie Leave Bot lets employees submit and track leave requests directly in Telegram. OpenVie handles the request workflow; Telegram is simply a more convenient place to communicate.
+OpenVie Leave Bot lets you submit and track leave requests directly in Telegram. OpenVie handles the request workflow; Telegram is simply a more convenient place to communicate.
 
-### For employees
+### How to use
 
 Open a chat with the bot in Telegram and send `/start`. Start with `/leave`, or just send a message such as:
 
@@ -133,18 +127,13 @@ The bot asks for any missing details and sends a preview before creating a reque
 
 When a request is approved or rejected in OpenVie, the bot sends the result to Telegram.
 
-### For organizations
+### Quick overview
 
-This bot is for teams that already manage leave workflows in OpenVie and want employees to submit requests from Telegram.
+This is a Telegram bot that connects to OpenVie to create and track leave requests. Configure the token and API key, then run it with Node.js. The bot uses long polling, so it does not need a webhook or public URL.
 
-- Each Telegram chat has an independent OpenVie session.
-- A request is created only after the sender confirms it.
-- Approval stays in OpenVie; the bot does not approve requests for administrators.
-- The bot uses Telegram long polling, so it does not need a webhook or public URL.
+### Setup and run
 
-### Setup
-
-You need Node.js 20 or later, a Telegram Bot Token from [@BotFather](https://t.me/BotFather), and an OpenVie API key allowed to create leave requests in the target workspace.
+You need Node.js 20 or later, a Telegram Bot Token from [@BotFather](https://t.me/BotFather), and an OpenVie API key allowed to create leave requests.
 
 ```bash
 git clone <repository-url>
@@ -152,7 +141,7 @@ cd <source-directory>
 cp .env.example .env
 ```
 
-Fill in `.env` with your environment details:
+Fill in `.env` with your token and OpenVie details:
 
 ```env
 TELEGRAM_BOT_TOKEN=123456:replace-this
@@ -170,7 +159,7 @@ npm run check
 npm start
 ```
 
-The bot has no package dependencies, so `npm install` is not required. For a long-running deployment, run `npm start` through the service manager appropriate for your infrastructure.
+The bot has no package dependencies, so `npm install` is not required. To stop it, press `Ctrl+C` in the running terminal.
 
 ### Configuration
 
@@ -193,16 +182,16 @@ Do not commit or share tokens, API keys, or state files in chat. If a token has 
 
 ```mermaid
 flowchart TD
-    employee[Employee] --> telegram[Messages the bot on Telegram]
+    user[User] --> telegram[Messages the bot on Telegram]
     telegram --> chat[OpenVie checks request details]
     chat --> complete{Details complete?}
     complete -- No --> ask[Bot requests more details]
-    ask --> employee
+    ask --> user
     complete -- Yes --> preview[Bot sends a preview]
     preview --> choice{User chooses}
-    choice -- Edit --> employee
+    choice -- Edit --> user
     choice -- Confirm --> request[OpenVie creates the leave request]
-    request --> approval[Administrator reviews it in OpenVie]
+    request --> approval[OpenVie processes approval]
     approval --> notification[Bot sends the status to Telegram]
 ```
 
